@@ -14,20 +14,26 @@ Works on **any GPU** — the plugin touches no graphics APIs, only engine timing
 
 That's it. A safe config is generated on first launch at `BepInEx/config/com.black.peaklscompat.cfg`.
 
-## Recommended Lossless Scaling setup
+## Recommended Lossless Scaling setup (validated empirically)
 
 **Any GPU:**
 
 - Game in **borderless fullscreen** (not exclusive)
 - Capture API: **WGC** (Windows 11 24H2+), Max Frame Latency **2**
 - **G-Sync support OFF** unless your display actually supports G-Sync
+- **Scaling Type: Off** — frame generation only
 - LSFG mode: **Fixed ×2**, target ≈ monitor refresh (or slightly below)
+- In `config.ini` (LS install folder): set `show_captured = 0` so the FPS counter shows the **output** framerate (with generated frames), not the base
 
-**Weak GPUs (e.g. GTX 1650 Ti):** frame generation needs GPU headroom. If your base fps collapses with LSFG on:
+**Weak GPUs (e.g. GTX 1650 Ti):** frame gen costs real GPU headroom (capture + interpolation ≈ 15–25 fps of base). Measured on a GTX 1650 Ti with PEAK @1080p:
 
-1. Enable **upscaling first**: Scaling Type **LS1** (Performance), factor ~**1.5**, Auto Scale on — this lowers the render cost.
-2. Then keep LSFG Fixed ×2 on top.
-3. Expect modest net gains: frame gen trades real frames for generated ones. On a GPU already at 100% load the base fps drops, and LSFG needs base ≥ 30–40 fps (60 ideal).
+| Config | Base (real) | Output (felt) |
+|---|---|---|
+| No LS | ~60 | ~60 |
+| Upscale LS1 ×1.5 + FG ×2 | 32 | 65 |
+| **FG ×2 only (recommended)** | **47–52** | **105+** |
+
+→ **Do not combine upscaling with frame gen on weak GPUs** — the upscale's cost ate more than it freed. Instead, lower the **game's own resolution** (e.g. 1280×720) and let the monitor stretch it; with the plugin's `HalfRefresh` cap the base holds at refresh/2 and FG ×2 delivers the full refresh rate.
 
 **Important:** close **MSI Afterburner / RivaTuner (RTSS)** while playing. Their Present hooks interfere with LS capture and cause heavy blur/ghosting artifacts (confirmed by testing).
 
