@@ -31,9 +31,10 @@ That's it. A safe config is generated on first launch at `BepInEx/config/com.bla
 |---|---|---|
 | No LS | ~60 | ~60 |
 | Upscale LS1 ×1.5 + FG ×2 | 32 | 65 |
-| **FG ×2 only (recommended)** | **47–52** | **105+** |
+| FG ×2 only @1080p | 47–52 | 105 peak |
+| **FG ×2 only, game at 720p (best)** | ~45 | **~90 stable** |
 
-→ **Do not combine upscaling with frame gen on weak GPUs** — the upscale's cost ate more than it freed. Instead, lower the **game's own resolution** (e.g. 1280×720) and let the monitor stretch it; with the plugin's `HalfRefresh` cap the base holds at refresh/2 and FG ×2 delivers the full refresh rate.
+→ **Do not combine upscaling with frame gen on weak GPUs** — the upscale's cost ate more than it freed. Instead, lower the **game's own resolution** (e.g. 1280×720) and let the monitor stretch it; with the plugin's `HalfRefresh` cap the base stays smooth and FG ×2 delivers up to the full refresh rate. Verified playable in-game with near-native responsiveness.
 
 **Important:** close **MSI Afterburner / RivaTuner (RTSS)** while playing. Their Present hooks interfere with LS capture and cause heavy blur/ghosting artifacts (confirmed by testing).
 
