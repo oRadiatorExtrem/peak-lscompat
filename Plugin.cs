@@ -35,7 +35,7 @@ namespace PeakLSCompat
     //   - Upscale first (Scaling Type LS1, factor ~1.5), then LSFG Fixed x2
     //   - Close MSI Afterburner / RTSS while playing (their Present hooks
     //     corrupt LS capture -> blur/ghosting artifacts)
-    [BepInPlugin("com.black.peaklscompat", "PEAK LS Compat", "0.2.0")]
+    [BepInPlugin("com.black.peaklscompat", "PEAK LS Compat", "0.3.0")]
     public class LSCompatPlugin : BaseUnityPlugin
     {
         private ManualLogSource _log;
@@ -45,6 +45,21 @@ namespace PeakLSCompat
         private float _lastPumpCheck;
         private int _pumpFrames;
         private int _pendingTargetFps = -1;
+
+        // live measurements for the player-friendly overlay (1-2 s windows)
+        private int _pumpFramesFast;
+        private float _pumpFastStart;
+        private float _pumpHzFast;
+        private int _fixedSteps;
+        private float _fixedWinStart;
+        private float _fixedHzMeasured;
+        private float _speedWinStart = -1f;
+        private float _speedSimStart;
+        private float _speedRatio = 1f;
+        private bool _speedReady;
+        private bool _showAdvanced;
+        private GUIStyle _bigStyle;
+        private bool _stylesMade;
 
         public static ConfigEntry<bool> FixMaximumDeltaTime;
         public static ConfigEntry<float> MaximumDeltaTime;
@@ -73,7 +88,7 @@ namespace PeakLSCompat
                     new ConfigDescription("Fixed cap used when ForceTargetFrameRateMode = Fixed.",
                         new AcceptableValueRange<int>(30, 240)));
                 EnableOverlay = Config.Bind("Diagnostics", "EnableOverlay", false,
-                    "On-screen status overlay (toggle with F8). Costs a little CPU when on; off by default for maximum performance.");
+                    "Player-friendly status overlay. Press F8 in game to show/hide it at any time (no config edit needed); F9 toggles technical details. Off by default for maximum performance.");
                 StateLogInterval = Config.Bind("Diagnostics", "StateLogInterval", 5f,
                     new ConfigDescription("Seconds between periodic state log lines (BepInEx log).",
                         new AcceptableValueRange<float>(1f, 60f)));
@@ -108,11 +123,71 @@ namespace PeakLSCompat
                 ApplyTimeFixes();
                 LogTransitions();
                 PumpHealth();
+                HandleOverlayKeys();
+                UpdateMeasures();
             }
             catch (Exception e)
             {
                 // never let the compat layer kill the game loop
                 _log.LogError("[PeakLSCompat] update error (suppressed): " + e.Message);
+            }
+        }
+
+        private void FixedUpdate()
+        {
+            try
+            {
+                _fixedSteps++;
+                float now = Time.unscaledTime;
+                if (_fixedWinStart <= 0f) _fixedWinStart = now;
+                else if (now - _fixedWinStart >= 1f)
+                {
+                    _fixedHzMeasured = _fixedSteps / (now - _fixedWinStart);
+                    _fixedSteps = 0;
+                    _fixedWinStart = now;
+                }
+            }
+            catch { }
+        }
+
+        private void HandleOverlayKeys()
+        {
+            if (EnableOverlay == null) return;
+            if (Input.GetKeyDown(KeyCode.F8))
+            {
+                EnableOverlay.Value = !EnableOverlay.Value;
+                _log.LogInfo("[PeakLSCompat] overlay " + (EnableOverlay.Value ? "ON" : "OFF"));
+            }
+            if (Input.GetKeyDown(KeyCode.F9)) _showAdvanced = !_showAdvanced;
+        }
+
+        private void UpdateMeasures()
+        {
+            // rendered frames per second (1 s window)
+            _pumpFramesFast++;
+            float now = Time.unscaledTime;
+            if (_pumpFastStart <= 0f) _pumpFastStart = now;
+            else if (now - _pumpFastStart >= 1f)
+            {
+                _pumpHzFast = _pumpFramesFast / (now - _pumpFastStart);
+                _pumpFramesFast = 0;
+                _pumpFastStart = now;
+            }
+
+            // game-world speed vs real time (2 s window) — < 1 means slow motion
+            if (_speedWinStart < 0f)
+            {
+                _speedWinStart = now;
+                _speedSimStart = Time.time;
+            }
+            else if (now - _speedWinStart >= 2f)
+            {
+                float wall = now - _speedWinStart;
+                float sim = Time.time - _speedSimStart;
+                _speedRatio = wall > 0.001f ? sim / wall : 1f;
+                _speedReady = true;
+                _speedWinStart = now;
+                _speedSimStart = Time.time;
             }
         }
 
@@ -249,17 +324,56 @@ namespace PeakLSCompat
             try
             {
                 if (EnableOverlay == null || !EnableOverlay.Value) return;
-                GUILayout.Window(0x5D1A6, new Rect(10f, 10f, 480f, 150f), (GUI.WindowFunction)DrawWindow, "PEAK LS Compat");
+                GUILayout.Window(0x5D1A6, new Rect(10f, 10f, 470f, 230f), (GUI.WindowFunction)DrawWindow, "PEAK + Lossless Scaling");
             }
             catch { }
         }
 
         private void DrawWindow(int id)
         {
-            GUILayout.Label(string.Format(
-                "PEAK LS Compat\nmaxDt: {0:F2}\ntargetFPS: {1}\nmode: {2}\nfocused: {3}",
-                Time.maximumDeltaTime, Application.targetFrameRate,
-                ForceTargetFrameRateMode.Value, Application.isFocused));
+            if (!_stylesMade)
+            {
+                _bigStyle = new GUIStyle(GUI.skin.label);
+                _bigStyle.fontSize = 17;
+                _bigStyle.fontStyle = FontStyle.Bold;
+                _stylesMade = true;
+            }
+
+            float expectedFixed = Time.fixedDeltaTime > 0f ? 1f / Time.fixedDeltaTime : 60f;
+
+            // ---- big player-friendly verdict ----
+            string speedText;
+            Color c;
+            if (!_speedReady) { speedText = "measuring..."; c = Color.yellow; }
+            else if (_speedRatio >= 0.95f && _fixedHzMeasured >= expectedFixed * 0.5f)
+            { speedText = "OK - full speed"; c = new Color(0.35f, 0.85f, 0.4f); }
+            else if (_speedRatio >= 0.85f)
+            { speedText = "slightly behind"; c = new Color(0.95f, 0.8f, 0.2f); }
+            else
+            { speedText = "SLOW - the slow-motion bug"; c = new Color(1f, 0.35f, 0.3f); }
+
+            _bigStyle.normal.textColor = c;
+            GUILayout.Label("Game speed: " + speedText, _bigStyle);
+            GUILayout.Space(8f);
+
+            GUILayout.Label(string.Format("Frames: {0} fps", _pumpHzFast.ToString("F0")));
+            GUILayout.Label(string.Format("Game world: {0} steps/s (normal: {1})",
+                _fixedHzMeasured.ToString("F0"), expectedFixed.ToString("F0")));
+            GUILayout.Label("Window focused: " + (Application.isFocused ? "yes" : "no"));
+
+            GUILayout.Space(6f);
+            GUILayout.Label("F8: show/hide   F9: technical details", GUILayout.Width(430f));
+
+            if (_showAdvanced)
+            {
+                GUILayout.Space(6f);
+                GUILayout.Label(string.Format(
+                    "maxDeltaTime: {0:F2} | targetFPS: {1} | cap: {2}\nspeed ratio: {3:F2} | world lag: {4:F1}s | focused: {5}",
+                    Time.maximumDeltaTime, Application.targetFrameRate,
+                    ForceTargetFrameRateMode.Value, _speedRatio,
+                    Time.unscaledTime - Time.time, Application.isFocused));
+            }
+
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
         }
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 (2026-08-28)
+
+- Overlay redesign, player-friendly: big "Game speed: OK / SLOW" verdict, rendered fps and world simulation steps in plain language; technical details (maxDeltaTime, targetFPS, speed ratio, world lag) moved behind F9.
+- Fixed: F8 actually toggles the overlay in game now (previously it was documented but not implemented).
+- Overlay now shows live measurements (1-2 s windows), not just config values — a screenshot of it is self-contained evidence that the fix is working.
+
 ## 0.2.0 (2026-08-28)
 
 - Fixed: slow-motion under LSFG is fully eliminated (Time.maximumDeltaTime raised, config-driven).

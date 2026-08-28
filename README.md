@@ -28,6 +28,20 @@ Raw CSVs and the plotting script are in [`tools/`](tools/) (`PeakTimeDiag.csv` =
 
 That's it. A safe config is generated on first launch at `BepInEx/config/com.black.peaklscompat.cfg`.
 
+That's it. A safe config is generated on first launch at `BepInEx/config/com.black.peaklscompat.cfg`.
+
+## Is it working? (30-second check)
+
+Press **F8** while playing. A small status panel appears:
+
+> **Game speed: OK - full speed**
+> Frames: 55 fps
+> Game world: 60 steps/s (normal: 60)
+
+That's all you need to see. If it ever says **SLOW**, something is wrong — grab a screenshot of the panel (F9 adds technical details) and please open an issue with it.
+
+The panel is drawn inside the game's own picture, so screenshots and recordings capture it fine (unlike Lossless Scaling's own fps counter, which lives on a separate layer that capture tools can't see). F8 hides it again when you're done.
+
 ## Recommended Lossless Scaling setup (validated empirically)
 
 **Any GPU:**
@@ -61,7 +75,7 @@ That's it. A safe config is generated on first launch at `BepInEx/config/com.bla
 | `ForceRunInBackground` | `true` | Keeps sim running while the LS overlay holds focus. |
 | `ForceTargetFrameRateMode` | `HalfRefresh` | Caps base framerate to half your monitor refresh (stable input for LSFG). `Off` / `Fixed` / `HalfRefresh`. |
 | `ForceTargetFrameRateValue` | `60` | Cap used when mode is `Fixed`. |
-| `EnableOverlay` | `false` | On-screen status overlay (F8 toggles). Off for max performance. |
+| `EnableOverlay` | `false` | Player-friendly status panel — press **F8** in game to show/hide it at any time, no config edit needed. **F9** toggles technical details. Off by default for max performance. |
 
 ## Build
 
