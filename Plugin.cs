@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -7,37 +6,28 @@ using UnityEngine;
 
 namespace PeakLSCompat
 {
-    // PEAK LS Compat — makes Lossless Scaling (LSFG frame generation) safe to
-    // use with PEAK on any GPU.
+    // PEAK LS Compat — fixes the slow-motion bug caused by Lossless Scaling
+    // (LSFG frame generation) in PEAK. GPU-agnostic, no graphics APIs touched.
     //
-    // Problem it fixes (measured with PeakTimeDiag, r/PeakGame 1ndv7sw):
-    //   While LSFG is active, external capture/overlay interference can stall
-    //   or slow the game's render pump. Unity clamps Time.deltaTime at
-    //   Time.maximumDeltaTime (default 0.1667s), so simulation time falls
-    //   behind real time and the whole game (physics via FixedUpdate,
-    //   movement, timers) runs in slow motion.
+    // Built by @oRadiatorExtrem with assistance from GLM-5.3 Flash (Zhipu AI).
     //
-    // What this plugin does (GPU-agnostic, no graphics APIs touched):
-    //   1. Raises Time.maximumDeltaTime so deltaTime reflects the real frame
-    //      duration even during present/capture stalls -> no slow motion.
-    //   2. Forces Application.runInBackground = true so the simulation keeps
-    //      running while the LS overlay/window holds focus.
-    //   3. Optionally caps Application.targetFrameRate to a stable base
-    //      framerate (recommended: half the monitor refresh) so frame
-    //      generation has a clean, steady input.
-    //   4. Logs focus/fullscreen transitions to help diagnose external
-    //      overlay conflicts (RTSS/Afterburner hooks are known to break LS
-    //      capture -> disable them for this game).
+    // Root cause: while LSFG is active, external capture/overlay interference
+    // stalls the render pump. Unity clamps Time.deltaTime at
+    // Time.maximumDeltaTime (default 0.1667s), so simulation falls behind
+    // real time — the whole game runs in slow motion.
     //
-    // Recommended Lossless Scaling settings for weak GPUs (e.g. GTX 1650 Ti):
-    //   - Borderless fullscreen, CaptureApi WGC (Win11 24H2+), MaxFrameLatency 2
-    //   - G-Sync support OFF unless the display actually supports G-Sync
-    //   - Upscale first (Scaling Type LS1, factor ~1.5), then LSFG Fixed x2
-    //   - Close MSI Afterburner / RTSS while playing (their Present hooks
-    //     corrupt LS capture -> blur/ghosting artifacts)
-    [BepInPlugin("com.black.peaklscompat", "PEAK LS Compat", "0.3.0")]
+    // Fixes applied:
+    //   1. Raises Time.maximumDeltaTime so deltaTime reflects real frame
+    //      duration during capture stalls -> no slow motion.
+    //   2. Forces Application.runInBackground so the simulation keeps
+    //      running while the LS overlay holds focus.
+    //   3. Auto-caps targetFrameRate (HalfRefresh mode) for stable LSFG input.
+    //   4. Logs focus/fullscreen transitions for overlay conflict diagnosis.
+    [BepInPlugin("com.black.peaklscompat", "PEAK LS Compat", "0.3.1")]
     public class LSCompatPlugin : BaseUnityPlugin
     {
+        internal static LSCompatPlugin Instance;
+
         private ManualLogSource _log;
         private bool _lastFocused = true;
         private FullScreenMode _lastFsMode;
@@ -45,39 +35,40 @@ namespace PeakLSCompat
         private float _lastPumpCheck;
         private int _pumpFrames;
         private int _pendingTargetFps = -1;
+        private float _lastRefreshCheck;
+        private GameObject _overlayObj;
 
-        // live measurements for the player-friendly overlay (1-2 s windows)
-        private int _pumpFramesFast;
-        private float _pumpFastStart;
-        private float _pumpHzFast;
-        private int _fixedSteps;
-        private float _fixedWinStart;
-        private float _fixedHzMeasured;
-        private float _speedWinStart = -1f;
-        private float _speedSimStart;
-        private float _speedRatio = 1f;
-        private bool _speedReady;
-        private bool _showAdvanced;
-        private GUIStyle _bigStyle;
-        private bool _stylesMade;
+        // live measurements read by the overlay component
+        internal int _pumpFramesFast;
+        internal float _pumpFastStart;
+        internal float _pumpHzFast;
+        internal int _fixedSteps;
+        internal float _fixedWinStart;
+        internal float _fixedHzMeasured;
+        internal float _speedWinStart = -1f;
+        internal float _speedSimStart;
+        internal float _speedRatio = 1f;
+        internal bool _speedReady;
+        internal bool _showAdvanced;
 
         public static ConfigEntry<bool> FixMaximumDeltaTime;
         public static ConfigEntry<float> MaximumDeltaTime;
         public static ConfigEntry<bool> ForceRunInBackground;
-        public static ConfigEntry<string> ForceTargetFrameRateMode; // Off / Fixed / HalfRefresh
+        public static ConfigEntry<string> ForceTargetFrameRateMode;
         public static ConfigEntry<int> ForceTargetFrameRateValue;
         public static ConfigEntry<bool> EnableOverlay;
         public static ConfigEntry<float> StateLogInterval;
 
         private void Awake()
         {
+            Instance = this;
             _log = Logger;
             try
             {
                 FixMaximumDeltaTime = Config.Bind("Time", "FixMaximumDeltaTime", true,
                     "Raise Time.maximumDeltaTime so deltaTime is not clamped during LS capture stalls (fixes slow motion). Keep true.");
-                MaximumDeltaTime = Config.Bind("Time", "MaximumDeltaTime", 1.0f,
-                    new ConfigDescription("Value for Time.maximumDeltaTime in seconds. 1.0 covers stalls up to 1 s per frame.",
+                MaximumDeltaTime = Config.Bind("Time", "MaximumDeltaTime", 0.5f,
+                    new ConfigDescription("Value for Time.maximumDeltaTime in seconds. 0.5 covers typical LS stalls while limiting physics catch-up to ~30 steps (avoids spiral of death).",
                         new AcceptableValueRange<float>(0.1f, 5f)));
                 ForceRunInBackground = Config.Bind("Time", "ForceRunInBackground", true,
                     "Force Application.runInBackground = true (keeps the sim running while the LS overlay holds focus).");
@@ -102,7 +93,7 @@ namespace PeakLSCompat
             {
                 _lastFsMode = Screen.fullScreenMode;
             }
-            catch { /* headless/odd setups */ }
+            catch { }
 
             _log.LogInfo(string.Format(
                 "[PeakLSCompat] v{0} ready: maximumDeltaTime={1:F4} runInBackground={2} targetFPS={3} vsync={4}",
@@ -114,6 +105,7 @@ namespace PeakLSCompat
         {
             _nextStateLog = Time.unscaledTime + Math.Max(1f, StateLogInterval.Value);
             _lastPumpCheck = Time.unscaledTime;
+            SyncOverlay();
         }
 
         private void Update()
@@ -128,7 +120,6 @@ namespace PeakLSCompat
             }
             catch (Exception e)
             {
-                // never let the compat layer kill the game loop
                 _log.LogError("[PeakLSCompat] update error (suppressed): " + e.Message);
             }
         }
@@ -156,14 +147,32 @@ namespace PeakLSCompat
             if (Input.GetKeyDown(KeyCode.F8))
             {
                 EnableOverlay.Value = !EnableOverlay.Value;
+                SyncOverlay();
                 _log.LogInfo("[PeakLSCompat] overlay " + (EnableOverlay.Value ? "ON" : "OFF"));
             }
             if (Input.GetKeyDown(KeyCode.F9)) _showAdvanced = !_showAdvanced;
         }
 
+        // Create/destroy the overlay GameObject so OnGUI only exists when visible.
+        // Eliminates ~0.7 KB/frame GC allocation from Unity's IMGUI event system.
+        private void SyncOverlay()
+        {
+            bool want = EnableOverlay != null && EnableOverlay.Value;
+            if (want && _overlayObj == null)
+            {
+                _overlayObj = new GameObject("PeakLSCompat_Overlay");
+                _overlayObj.AddComponent<LSCompatOverlay>();
+                UnityEngine.Object.DontDestroyOnLoad(_overlayObj);
+            }
+            else if (!want && _overlayObj != null)
+            {
+                UnityEngine.Object.Destroy(_overlayObj);
+                _overlayObj = null;
+            }
+        }
+
         private void UpdateMeasures()
         {
-            // rendered frames per second (1 s window)
             _pumpFramesFast++;
             float now = Time.unscaledTime;
             if (_pumpFastStart <= 0f) _pumpFastStart = now;
@@ -174,7 +183,6 @@ namespace PeakLSCompat
                 _pumpFastStart = now;
             }
 
-            // game-world speed vs real time (2 s window) — < 1 means slow motion
             if (_speedWinStart < 0f)
             {
                 _speedWinStart = now;
@@ -193,27 +201,36 @@ namespace PeakLSCompat
 
         private void ApplyTimeFixes()
         {
+            if (FixMaximumDeltaTime == null || MaximumDeltaTime == null) return;
+
             if (FixMaximumDeltaTime.Value && Math.Abs(Time.maximumDeltaTime - MaximumDeltaTime.Value) > 0.001f)
             {
                 Time.maximumDeltaTime = Math.Max(0.1f, MaximumDeltaTime.Value);
                 _log.LogInfo(string.Format("[PeakLSCompat] Time.maximumDeltaTime -> {0:F2}", Time.maximumDeltaTime));
             }
 
-            if (ForceRunInBackground.Value && !Application.runInBackground)
+            if (ForceRunInBackground != null && ForceRunInBackground.Value && !Application.runInBackground)
             {
                 Application.runInBackground = true;
                 _log.LogInfo("[PeakLSCompat] runInBackground -> true");
             }
 
             int desired = ResolveTargetFps();
-            if (desired > 0 && Application.targetFrameRate != desired)
+            if (desired > 0)
             {
-                Application.targetFrameRate = desired;
-                _log.LogInfo(string.Format("[PeakLSCompat] targetFrameRate -> {0}", desired));
+                if (QualitySettings.vSyncCount != 0)
+                {
+                    _log.LogInfo(string.Format("[PeakLSCompat] disabling vSync (was {0}) so targetFrameRate cap works", QualitySettings.vSyncCount));
+                    QualitySettings.vSyncCount = 0;
+                }
+                if (Application.targetFrameRate != desired)
+                {
+                    Application.targetFrameRate = desired;
+                    _log.LogInfo(string.Format("[PeakLSCompat] targetFrameRate -> {0}", desired));
+                }
             }
         }
 
-        // Returns 0 when no cap should be applied.
         private int ResolveTargetFps()
         {
             string mode;
@@ -226,34 +243,36 @@ namespace PeakLSCompat
 
             if (string.Equals(mode, "HalfRefresh", StringComparison.OrdinalIgnoreCase))
             {
-                if (_pendingTargetFps > 0) return _pendingTargetFps;
+                float now = Time.unscaledTime;
+                if (_pendingTargetFps > 0 && now - _lastRefreshCheck < 30f)
+                    return _pendingTargetFps;
+
                 int hz = GetRefreshRate();
                 if (hz > 30)
                 {
-                    _pendingTargetFps = hz / 2; // integer division; 144 -> 72, 60 -> 30
-                    // avoid absurd caps from odd refresh values
-                    if (_pendingTargetFps < 30) _pendingTargetFps = 30;
-                    if (_pendingTargetFps > 120) _pendingTargetFps = 120;
-                    _log.LogInfo(string.Format("[PeakLSCompat] detected refresh {0} Hz -> base cap {1} fps", hz, _pendingTargetFps));
+                    int cap = hz / 2;
+                    if (cap < 30) cap = 30;
+                    if (cap > 120) cap = 120;
+                    if (cap != _pendingTargetFps)
+                        _log.LogInfo(string.Format("[PeakLSCompat] detected refresh {0} Hz -> base cap {1} fps", hz, cap));
+                    _pendingTargetFps = cap;
+                    _lastRefreshCheck = now;
                     return _pendingTargetFps;
                 }
-                return 0; // unknown refresh; leave the game's own setting
+                return 0;
             }
             return 0;
         }
 
-        // Best-effort monitor refresh rate detection (no external dependencies).
         private static int GetRefreshRate()
         {
             try
             {
                 var res = Screen.currentResolution;
-                int legacy = res.refreshRate; // deprecated in Unity 6 but functional
+                int legacy = res.refreshRate;
                 if (legacy > 30 && legacy < 500) return legacy;
 
-                // Unity 6: refreshRateRatio (numerator/denominator) via reflection
                 var ratioField = res.GetType().GetField("refreshRateRatio");
-                if (ratioField == null) ratioField = (System.Reflection.FieldInfo)(object)null;
                 object ratio = ratioField != null ? ratioField.GetValue(res) : null;
                 if (ratio == null)
                 {
@@ -318,12 +337,21 @@ namespace PeakLSCompat
                 _nextStateLog = now + Math.Max(1f, StateLogInterval.Value);
             }
         }
+    }
+
+    // Separate component so OnGUI (and its ~0.7 KB/frame GC allocation) only
+    // exists while the overlay is actually visible. Destroyed when F8 hides it.
+    internal class LSCompatOverlay : MonoBehaviour
+    {
+        private GUIStyle _bigStyle;
+        private bool _stylesMade;
 
         private void OnGUI()
         {
             try
             {
-                if (EnableOverlay == null || !EnableOverlay.Value) return;
+                var p = LSCompatPlugin.Instance;
+                if (p == null) return;
                 GUILayout.Window(0x5D1A6, new Rect(10f, 10f, 470f, 230f), (GUI.WindowFunction)DrawWindow, "PEAK + Lossless Scaling");
             }
             catch { }
@@ -331,6 +359,9 @@ namespace PeakLSCompat
 
         private void DrawWindow(int id)
         {
+            var p = LSCompatPlugin.Instance;
+            if (p == null) return;
+
             if (!_stylesMade)
             {
                 _bigStyle = new GUIStyle(GUI.skin.label);
@@ -341,13 +372,12 @@ namespace PeakLSCompat
 
             float expectedFixed = Time.fixedDeltaTime > 0f ? 1f / Time.fixedDeltaTime : 60f;
 
-            // ---- big player-friendly verdict ----
             string speedText;
             Color c;
-            if (!_speedReady) { speedText = "measuring..."; c = Color.yellow; }
-            else if (_speedRatio >= 0.95f && _fixedHzMeasured >= expectedFixed * 0.5f)
+            if (!p._speedReady) { speedText = "measuring..."; c = Color.yellow; }
+            else if (p._speedRatio >= 0.95f && p._fixedHzMeasured >= expectedFixed * 0.5f)
             { speedText = "OK - full speed"; c = new Color(0.35f, 0.85f, 0.4f); }
-            else if (_speedRatio >= 0.85f)
+            else if (p._speedRatio >= 0.85f)
             { speedText = "slightly behind"; c = new Color(0.95f, 0.8f, 0.2f); }
             else
             { speedText = "SLOW - the slow-motion bug"; c = new Color(1f, 0.35f, 0.3f); }
@@ -356,21 +386,21 @@ namespace PeakLSCompat
             GUILayout.Label("Game speed: " + speedText, _bigStyle);
             GUILayout.Space(8f);
 
-            GUILayout.Label(string.Format("Frames: {0} fps", _pumpHzFast.ToString("F0")));
+            GUILayout.Label(string.Format("Frames: {0} fps", p._pumpHzFast.ToString("F0")));
             GUILayout.Label(string.Format("Game world: {0} steps/s (normal: {1})",
-                _fixedHzMeasured.ToString("F0"), expectedFixed.ToString("F0")));
+                p._fixedHzMeasured.ToString("F0"), expectedFixed.ToString("F0")));
             GUILayout.Label("Window focused: " + (Application.isFocused ? "yes" : "no"));
 
             GUILayout.Space(6f);
             GUILayout.Label("F8: show/hide   F9: technical details", GUILayout.Width(430f));
 
-            if (_showAdvanced)
+            if (p._showAdvanced)
             {
                 GUILayout.Space(6f);
                 GUILayout.Label(string.Format(
                     "maxDeltaTime: {0:F2} | targetFPS: {1} | cap: {2}\nspeed ratio: {3:F2} | world lag: {4:F1}s | focused: {5}",
                     Time.maximumDeltaTime, Application.targetFrameRate,
-                    ForceTargetFrameRateMode.Value, _speedRatio,
+                    LSCompatPlugin.ForceTargetFrameRateMode.Value, p._speedRatio,
                     Time.unscaledTime - Time.time, Application.isFocused));
             }
 
